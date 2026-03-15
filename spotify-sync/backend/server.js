@@ -42,7 +42,6 @@ function generateRoomCode() {
 // Step 1: Redirect user to Spotify login
 app.get('/login', (req, res) => {
   const scope = [
-    'streaming',
     'user-read-email',
     'user-read-private',
     'user-read-playback-state',
