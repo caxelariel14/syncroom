@@ -1,0 +1,9 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "node server.js"
+
+[nixpacks]
+buildCommand = "cd spotify-sync/backend && npm install"
+startCommand = "cd spotify-sync/backend && node server.js"
