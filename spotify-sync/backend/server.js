@@ -20,33 +20,21 @@ const io = new Server(server, {
 app.use(cors({ origin: FRONTEND_URL }));
 app.use(express.json());
 
-// ─── ENV VARS (set these in Railway) ────────────────────────────────────────
 const CLIENT_ID = process.env.SPOTIFY_CLIENT_ID;
 const CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
 const REDIRECT_URI = process.env.REDIRECT_URI || 'http://localhost:3001/callback';
 const PORT = process.env.PORT || 3001;
 
-// ─── IN-MEMORY STORAGE ───────────────────────────────────────────────────────
-// rooms[roomCode] = { host, members[], playlist, currentTrack, isPlaying, position, startedAt }
 const rooms = {};
-// streamCounts[trackId] = { track: {...}, streams: N }
 const streamCounts = {};
 
-// ─── HELPERS ─────────────────────────────────────────────────────────────────
 function generateRoomCode() {
   return Math.random().toString(36).substring(2, 7).toUpperCase();
 }
 
-// ─── SPOTIFY AUTH ROUTES ─────────────────────────────────────────────────────
-
 // Step 1: Redirect user to Spotify login
 app.get('/login', (req, res) => {
-  const scope = [
-    'user-read-email',
-    'user-read-private',
-    'playlist-read-private',
-    'playlist-read-collaborative',
-  ].join(' ');
+  const scope = 'user-read-email user-read-private user-read-playback-state user-modify-playback-state playlist-read-private playlist-read-collaborative';
 
   const params = querystring.stringify({
     response_type: 'code',
@@ -130,20 +118,16 @@ app.get('/refresh_token', async (req, res) => {
   }
 });
 
-// Get global stream counts
 app.get('/streams', (req, res) => {
   const sorted = Object.values(streamCounts).sort((a, b) => b.streams - a.streams);
   res.json(sorted);
 });
 
-// Health check
 app.get('/health', (req, res) => res.json({ status: 'ok', rooms: Object.keys(rooms).length }));
 
-// ─── SOCKET.IO ───────────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
   console.log(`[+] Socket connected: ${socket.id}`);
 
-  // ── Create Room ──────────────────────────────────────────────────────────
   socket.on('create_room', ({ username }) => {
     const roomCode = generateRoomCode();
     rooms[roomCode] = {
@@ -164,7 +148,6 @@ io.on('connection', (socket) => {
     console.log(`Room ${roomCode} created by ${username}`);
   });
 
-  // ── Join Room ────────────────────────────────────────────────────────────
   socket.on('join_room', ({ roomCode, username }) => {
     const room = rooms[roomCode];
     if (!room) {
@@ -181,7 +164,6 @@ io.on('connection', (socket) => {
     socket.data.roomCode = roomCode;
     socket.data.username = username;
 
-    // Send current room state to the new member
     const elapsed = room.startedAt ? Date.now() - room.startedAt : 0;
     socket.emit('room_joined', {
       roomCode,
@@ -194,7 +176,6 @@ io.on('connection', (socket) => {
       position: room.isPlaying ? room.position + elapsed : room.position,
     });
 
-    // Notify everyone else
     io.to(roomCode).emit('members_updated', {
       members: room.members.map((m) => m.username),
       count: room.members.length,
@@ -204,7 +185,6 @@ io.on('connection', (socket) => {
     console.log(`${username} joined room ${roomCode} (${room.members.length}/100)`);
   });
 
-  // ── Host sets playlist ───────────────────────────────────────────────────
   socket.on('set_playlist', ({ playlist }) => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
@@ -220,13 +200,11 @@ io.on('connection', (socket) => {
     console.log(`Playlist "${playlist.name}" set in room ${roomCode}`);
   });
 
-  // ── Host plays a track ───────────────────────────────────────────────────
   socket.on('play_track', ({ track, position = 0 }) => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
     if (!room || room.host !== socket.id) return;
 
-    // Cancel any pending stream timer for the previous track
     if (room.streamTimers[track.id]) {
       clearTimeout(room.streamTimers[track.id]);
     }
@@ -238,7 +216,6 @@ io.on('connection', (socket) => {
 
     io.to(roomCode).emit('play_track', { track, position, timestamp: Date.now() });
 
-    // Count streams after 30 seconds (Spotify's threshold)
     room.streamTimers[track.id] = setTimeout(() => {
       if (rooms[roomCode]?.currentTrack?.id === track.id && rooms[roomCode]?.isPlaying) {
         const memberCount = rooms[roomCode]?.members?.length || 0;
@@ -257,7 +234,6 @@ io.on('connection', (socket) => {
     }, 30_000);
   });
 
-  // ── Host pauses ──────────────────────────────────────────────────────────
   socket.on('pause', () => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
@@ -272,7 +248,6 @@ io.on('connection', (socket) => {
     io.to(roomCode).emit('pause');
   });
 
-  // ── Host resumes ─────────────────────────────────────────────────────────
   socket.on('resume', () => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
@@ -284,7 +259,6 @@ io.on('connection', (socket) => {
     io.to(roomCode).emit('resume', { position: room.position, timestamp: Date.now() });
   });
 
-  // ── Host skips to next track ─────────────────────────────────────────────
   socket.on('next_track', () => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
@@ -294,7 +268,6 @@ io.on('connection', (socket) => {
     room.currentTrackIndex = (room.currentTrackIndex + 1) % tracks.length;
     const track = tracks[room.currentTrackIndex];
 
-    // Emit play for the new track
     socket.emit('play_track', { track, position: 0, timestamp: Date.now() });
     socket.to(roomCode).emit('play_track', { track, position: 0, timestamp: Date.now() });
 
@@ -304,7 +277,6 @@ io.on('connection', (socket) => {
     room.isPlaying = true;
   });
 
-  // ── Host skips to previous track ────────────────────────────────────────
   socket.on('prev_track', () => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
@@ -322,7 +294,6 @@ io.on('connection', (socket) => {
     room.isPlaying = true;
   });
 
-  // ── Disconnect ───────────────────────────────────────────────────────────
   socket.on('disconnect', () => {
     const roomCode = socket.data.roomCode;
     if (!roomCode || !rooms[roomCode]) return;
@@ -332,7 +303,6 @@ io.on('connection', (socket) => {
     room.members = room.members.filter((m) => m.id !== socket.id);
 
     if (room.members.length === 0) {
-      // Clear all timers and delete the room
       Object.values(room.streamTimers).forEach(clearTimeout);
       delete rooms[roomCode];
       console.log(`Room ${roomCode} deleted (empty)`);
@@ -340,7 +310,6 @@ io.on('connection', (socket) => {
     }
 
     if (room.host === socket.id) {
-      // Transfer host to next member
       room.host = room.members[0].id;
       const newHostUsername = room.members[0].username;
       io.to(roomCode).emit('host_changed', { newHostUsername });
@@ -357,7 +326,7 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Spotify Sync server running on port ${PORT}`);
   console.log(`   Frontend URL: ${FRONTEND_URL}`);
 });
