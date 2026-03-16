@@ -33,14 +33,7 @@ function generateRoomCode() {
 
 app.get('/login', (req, res) => {
   // Sin 'streaming' — controlaremos el dispositivo activo del usuario
-  const scope = [
-    'user-read-email',
-    'user-read-private',
-    'user-read-playback-state',
-    'user-modify-playback-state',
-    'playlist-read-private',
-    'playlist-read-collaborative',
-  ].join(' ');
+  const scope = 'user-read-email user-read-private playlist-read-private playlist-read-collaborative';
 
   const params = querystring.stringify({
     response_type: 'code',
