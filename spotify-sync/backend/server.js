@@ -11,10 +11,7 @@ const server = http.createServer(app);
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 
 const io = new Server(server, {
-  cors: {
-    origin: FRONTEND_URL,
-    methods: ['GET', 'POST'],
-  },
+  cors: { origin: FRONTEND_URL, methods: ['GET', 'POST'] },
 });
 
 app.use(cors({ origin: FRONTEND_URL }));
@@ -32,10 +29,19 @@ function generateRoomCode() {
   return Math.random().toString(36).substring(2, 7).toUpperCase();
 }
 
-// Step 1: Redirect user to Spotify login
+// ─── SPOTIFY AUTH ─────────────────────────────────────────────────────────────
+
 app.get('/login', (req, res) => {
-const scope = 'streaming user-read-email user-read-private user-read-playback-state user-modify-playback-state playlist-read-private playlist-read-collaborative';
-  
+  // Sin 'streaming' — controlaremos el dispositivo activo del usuario
+  const scope = [
+    'user-read-email',
+    'user-read-private',
+    'user-read-playback-state',
+    'user-modify-playback-state',
+    'playlist-read-private',
+    'playlist-read-collaborative',
+  ].join(' ');
+
   const params = querystring.stringify({
     response_type: 'code',
     client_id: CLIENT_ID,
@@ -47,86 +53,59 @@ const scope = 'streaming user-read-email user-read-private user-read-playback-st
   res.redirect(`https://accounts.spotify.com/authorize?${params}`);
 });
 
-// Step 2: Spotify calls back here with auth code
 app.get('/callback', async (req, res) => {
   const { code, state, error } = req.query;
-
-  if (error) {
-    return res.redirect(`${FRONTEND_URL}?error=${error}`);
-  }
+  if (error) return res.redirect(`${FRONTEND_URL}?error=${error}`);
 
   try {
     const tokenRes = await axios.post(
       'https://accounts.spotify.com/api/token',
-      querystring.stringify({
-        code,
-        redirect_uri: REDIRECT_URI,
-        grant_type: 'authorization_code',
-      }),
+      querystring.stringify({ code, redirect_uri: REDIRECT_URI, grant_type: 'authorization_code' }),
       {
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
-          Authorization:
-            'Basic ' +
-            Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64'),
+          Authorization: 'Basic ' + Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64'),
         },
       }
     );
-
     const { access_token, refresh_token, expires_in } = tokenRes.data;
-    const params = querystring.stringify({
-      access_token,
-      refresh_token,
-      expires_in,
-      state,
-    });
-    res.redirect(`${FRONTEND_URL}?${params}`);
+    res.redirect(`${FRONTEND_URL}?${querystring.stringify({ access_token, refresh_token, expires_in, state })}`);
   } catch (err) {
     console.error('Token exchange failed:', err.response?.data || err.message);
     res.redirect(`${FRONTEND_URL}?error=token_exchange_failed`);
   }
 });
 
-// Refresh access token
 app.get('/refresh_token', async (req, res) => {
   const { refresh_token } = req.query;
   if (!refresh_token) return res.status(400).json({ error: 'Missing refresh_token' });
-
   try {
     const tokenRes = await axios.post(
       'https://accounts.spotify.com/api/token',
-      querystring.stringify({
-        grant_type: 'refresh_token',
-        refresh_token,
-      }),
+      querystring.stringify({ grant_type: 'refresh_token', refresh_token }),
       {
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
-          Authorization:
-            'Basic ' +
-            Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64'),
+          Authorization: 'Basic ' + Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64'),
         },
       }
     );
-    res.json({
-      access_token: tokenRes.data.access_token,
-      expires_in: tokenRes.data.expires_in,
-    });
+    res.json({ access_token: tokenRes.data.access_token, expires_in: tokenRes.data.expires_in });
   } catch (err) {
-    console.error('Token refresh failed:', err.response?.data || err.message);
     res.status(400).json({ error: 'Failed to refresh token' });
   }
 });
 
 app.get('/streams', (req, res) => {
-  const sorted = Object.values(streamCounts).sort((a, b) => b.streams - a.streams);
-  res.json(sorted);
+  res.json(Object.values(streamCounts).sort((a, b) => b.streams - a.streams));
 });
 
 app.get('/health', (req, res) => res.json({ status: 'ok', rooms: Object.keys(rooms).length }));
 
+// ─── SOCKET.IO ────────────────────────────────────────────────────────────────
+
 io.on('connection', (socket) => {
-  console.log(`[+] Socket connected: ${socket.id}`);
+  console.log(`[+] ${socket.id}`);
 
   socket.on('create_room', ({ username }) => {
     const roomCode = generateRoomCode();
@@ -145,19 +124,12 @@ io.on('connection', (socket) => {
     socket.data.roomCode = roomCode;
     socket.data.username = username;
     socket.emit('room_created', { roomCode });
-    console.log(`Room ${roomCode} created by ${username}`);
   });
 
   socket.on('join_room', ({ roomCode, username }) => {
     const room = rooms[roomCode];
-    if (!room) {
-      socket.emit('join_error', { message: 'Sala no encontrada. Verifica el código.' });
-      return;
-    }
-    if (room.members.length >= 100) {
-      socket.emit('join_error', { message: 'La sala está llena (máximo 100 personas).' });
-      return;
-    }
+    if (!room) { socket.emit('join_error', { message: 'Sala no encontrada.' }); return; }
+    if (room.members.length >= 100) { socket.emit('join_error', { message: 'Sala llena (máximo 100).' }); return; }
 
     room.members.push({ id: socket.id, username });
     socket.join(roomCode);
@@ -166,10 +138,9 @@ io.on('connection', (socket) => {
 
     const elapsed = room.startedAt ? Date.now() - room.startedAt : 0;
     socket.emit('room_joined', {
-      roomCode,
-      isHost: false,
-      hostUsername: room.members.find((m) => m.id === room.host)?.username,
-      members: room.members.map((m) => m.username),
+      roomCode, isHost: false,
+      hostUsername: room.members.find(m => m.id === room.host)?.username,
+      members: room.members.map(m => m.username),
       playlist: room.playlist,
       currentTrack: room.currentTrack,
       isPlaying: room.isPlaying,
@@ -177,27 +148,22 @@ io.on('connection', (socket) => {
     });
 
     io.to(roomCode).emit('members_updated', {
-      members: room.members.map((m) => m.username),
+      members: room.members.map(m => m.username),
       count: room.members.length,
       event: `${username} se unió`,
     });
-
-    console.log(`${username} joined room ${roomCode} (${room.members.length}/100)`);
   });
 
   socket.on('set_playlist', ({ playlist }) => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
     if (!room || room.host !== socket.id) return;
-
     room.playlist = playlist;
     room.currentTrackIndex = 0;
     room.currentTrack = playlist.tracks[0] || null;
     room.isPlaying = false;
     room.position = 0;
-
     io.to(roomCode).emit('playlist_loaded', { playlist, currentTrack: room.currentTrack });
-    console.log(`Playlist "${playlist.name}" set in room ${roomCode}`);
   });
 
   socket.on('play_track', ({ track, position = 0 }) => {
@@ -205,9 +171,7 @@ io.on('connection', (socket) => {
     const room = rooms[roomCode];
     if (!room || room.host !== socket.id) return;
 
-    if (room.streamTimers[track.id]) {
-      clearTimeout(room.streamTimers[track.id]);
-    }
+    if (room.streamTimers[track.id]) clearTimeout(room.streamTimers[track.id]);
 
     room.currentTrack = track;
     room.isPlaying = true;
@@ -219,17 +183,11 @@ io.on('connection', (socket) => {
     room.streamTimers[track.id] = setTimeout(() => {
       if (rooms[roomCode]?.currentTrack?.id === track.id && rooms[roomCode]?.isPlaying) {
         const memberCount = rooms[roomCode]?.members?.length || 0;
-        if (!streamCounts[track.id]) {
-          streamCounts[track.id] = { track, streams: 0 };
-        }
+        if (!streamCounts[track.id]) streamCounts[track.id] = { track, streams: 0 };
         streamCounts[track.id].streams += memberCount;
-
         io.to(roomCode).emit('streams_updated', {
-          track,
-          newStreams: memberCount,
-          totalStreams: streamCounts[track.id].streams,
+          track, newStreams: memberCount, totalStreams: streamCounts[track.id].streams,
         });
-        console.log(`+${memberCount} streams for "${track.name}" (total: ${streamCounts[track.id].streams})`);
       }
     }, 30_000);
   });
@@ -238,13 +196,9 @@ io.on('connection', (socket) => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
     if (!room || room.host !== socket.id) return;
-
-    if (room.isPlaying && room.startedAt) {
-      room.position += Date.now() - room.startedAt;
-    }
+    if (room.isPlaying && room.startedAt) room.position += Date.now() - room.startedAt;
     room.isPlaying = false;
     room.startedAt = null;
-
     io.to(roomCode).emit('pause');
   });
 
@@ -252,10 +206,8 @@ io.on('connection', (socket) => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
     if (!room || room.host !== socket.id) return;
-
     room.isPlaying = true;
     room.startedAt = Date.now();
-
     io.to(roomCode).emit('resume', { position: room.position, timestamp: Date.now() });
   });
 
@@ -263,69 +215,58 @@ io.on('connection', (socket) => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
     if (!room || room.host !== socket.id || !room.playlist) return;
-
     const tracks = room.playlist.tracks;
     room.currentTrackIndex = (room.currentTrackIndex + 1) % tracks.length;
     const track = tracks[room.currentTrackIndex];
-
-    socket.emit('play_track', { track, position: 0, timestamp: Date.now() });
-    socket.to(roomCode).emit('play_track', { track, position: 0, timestamp: Date.now() });
-
     room.currentTrack = track;
     room.position = 0;
     room.startedAt = Date.now();
     room.isPlaying = true;
+    io.to(roomCode).emit('play_track', { track, position: 0, timestamp: Date.now() });
   });
 
   socket.on('prev_track', () => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
     if (!room || room.host !== socket.id || !room.playlist) return;
-
     const tracks = room.playlist.tracks;
     room.currentTrackIndex = (room.currentTrackIndex - 1 + tracks.length) % tracks.length;
     const track = tracks[room.currentTrackIndex];
-
-    io.to(roomCode).emit('play_track', { track, position: 0, timestamp: Date.now() });
-
     room.currentTrack = track;
     room.position = 0;
     room.startedAt = Date.now();
     room.isPlaying = true;
+    io.to(roomCode).emit('play_track', { track, position: 0, timestamp: Date.now() });
   });
 
   socket.on('disconnect', () => {
     const roomCode = socket.data.roomCode;
     if (!roomCode || !rooms[roomCode]) return;
-
     const room = rooms[roomCode];
     const username = socket.data.username;
-    room.members = room.members.filter((m) => m.id !== socket.id);
+    room.members = room.members.filter(m => m.id !== socket.id);
 
     if (room.members.length === 0) {
       Object.values(room.streamTimers).forEach(clearTimeout);
       delete rooms[roomCode];
-      console.log(`Room ${roomCode} deleted (empty)`);
       return;
     }
-
     if (room.host === socket.id) {
       room.host = room.members[0].id;
-      const newHostUsername = room.members[0].username;
-      io.to(roomCode).emit('host_changed', { newHostUsername });
-      console.log(`Host of ${roomCode} changed to ${newHostUsername}`);
+      io.to(roomCode).emit('host_changed', { newHostUsername: room.members[0].username });
     }
-
     io.to(roomCode).emit('members_updated', {
-      members: room.members.map((m) => m.username),
+      members: room.members.map(m => m.username),
       count: room.members.length,
       event: `${username} salió`,
     });
-
-    console.log(`[-] ${username} left room ${roomCode}`);
   });
 });
 
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Spotify Sync server running on port ${PORT}`);
+  console.log(`   Frontend URL: ${FRONTEND_URL}`);
+});
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Spotify Sync server running on port ${PORT}`);
   console.log(`   Frontend URL: ${FRONTEND_URL}`);
